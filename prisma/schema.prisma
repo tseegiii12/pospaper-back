@@ -1,0 +1,343 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  ADMIN
+}
+
+enum CustomerType {
+  PERSON
+  ORGANIZATION
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+enum PriceMode {
+  VAT
+  NO_VAT
+}
+
+model User {
+  id              String           @id @default(uuid())
+  type            CustomerType     @default(PERSON)
+  phone           String           @unique
+  email           String           @unique
+  name            String? // contact person's name (both types) — for ORGANIZATION this is the contact, not the company
+  passwordHash    String
+  role            Role             @default(CUSTOMER)
+  // Organization-only fields. regNumber is the company registration number —
+  // usually 7 digits but formats vary (letters, other lengths), so it's kept
+  // as a string rather than an int. Left null for PERSON accounts; unique
+  // among the non-null (ORGANIZATION) rows since Postgres treats NULLs as
+  // distinct for unique constraints.
+  orgName         String?
+  regNumber       String?          @unique
+  lastAddress     String? // delivery address from the customer's most recent order, offered as a default on the next checkout
+  // Whether this account may check out with paymentType "invoice" (Нэхэмжлэх)
+  // instead of paying up front. Only meaningful for ORGANIZATION accounts with
+  // a supply contract; toggled by an admin, never by the customer.
+  canInvoice      Boolean          @default(false)
+  orders          Order[]
+  addresses       Address[]
+  invoicePayments InvoicePayment[]
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+}
+
+// A saved delivery address in a buyer's own address book ("Загвар хадгалах"
+// on the checkout page) — labelled by them (e.g. "Гэр", "Ажил") so they can
+// pick it again on a future order instead of retyping it. Structured the
+// same way as the checkout form itself (see AddressFields.jsx on the
+// frontend) rather than as a single string, so it can be edited field by
+// field and displayed cleanly in the admin panel.
+model Address {
+  id             String   @id @default(uuid())
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         String
+  label          String
+  addressType    String // apartment | house | office
+  aimag          String
+  district       String
+  khoroo         String
+  building       String?
+  unit           String?
+  houseNumber    String?
+  street         String?
+  officeBuilding String?
+  floor          String?
+  officeUnit     String?
+  officeName     String?
+  addressNote    String?
+  fullAddress    String // composed one-line display string, precomputed on save
+  orders         Order[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// A payment an organization made against its running invoice (pay-later)
+// balance. Recorded by an admin, not tied to a specific order — the balance
+// is netted as sum(invoice orders) - sum(payments), so a payment can cover
+// several orders at once or be a partial amount toward the total owed.
+model InvoicePayment {
+  id        String   @id @default(uuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  amount    Int
+  note      String?
+  // The date the org actually paid, as told to the admin — defaults to today
+  // but is editable since payments are often logged after the fact.
+  paidAt    DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// A quote request submitted from the public /corporate-supply page — a
+// prospective bulk-supply customer, not yet a User account.
+model CorporateLead {
+  id          String   @id @default(uuid())
+  companyName String
+  contactName String
+  phone       String
+  email       String?
+  createdAt   DateTime @default(now())
+}
+
+// A "Санал хүсэлт" (complaint/feedback) submission from the /contact page.
+model ContactMessage {
+  id        String   @id @default(uuid())
+  name      String?
+  phone     String
+  message   String?
+  createdAt DateTime @default(now())
+}
+
+model RegistrationOtp {
+  id           String       @id @default(uuid())
+  type         CustomerType @default(PERSON)
+  email        String       @unique
+  phone        String
+  name         String?
+  orgName      String?
+  regNumber    String?
+  passwordHash String
+  code         String
+  attempts     Int          @default(0)
+  expiresAt    DateTime
+  createdAt    DateTime     @default(now())
+}
+
+model Category {
+  id        String    @id @default(uuid())
+  label     String
+  products  Product[]
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Product {
+  id                 String          @id @default(uuid())
+  name               String
+  description        String?
+  categories         Category[]
+  tag                String?
+  tagClass           String?
+  images             String[]        @default([])
+  imgTag             String?
+  stockBadge         String?
+  stockQty           Int?
+  freeDeliveryMinQty Int? // buying at least this many units of this product qualifies the order for free delivery
+  rating             Decimal?        @db.Decimal(3, 2)
+  ordersCount        Int?
+  unitPrice          Int
+  marketPrice        Int?
+  unitPriceNoVat     Int?
+  recommended        Boolean         @default(false)
+  highlight          Boolean         @default(false)
+  active             Boolean         @default(true) // visibility toggle: hidden from storefront when false, independent of soft delete
+  deletedAt          DateTime? // soft delete: excluded everywhere except the admin trash view when set
+  orderItems         OrderItem[]
+  options            ProductOption[]
+  imageFiles         ProductImage[]
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+}
+
+// A binary image uploaded from the admin panel, served back via its own
+// route. Kept separate from `images` (URL strings) so uploaded files and
+// externally-linked URLs can coexist in that array.
+model ProductImage {
+  id        String   @id @default(uuid())
+  product   Product? @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String?
+  data      Bytes
+  mimeType  String
+  createdAt DateTime @default(now())
+
+  @@index([productId])
+}
+
+// A purchasable package size for a product, e.g. a box of 50pcs vs a box of
+// 100pcs — each carries its own pricing so it can be sold and ordered
+// independently. Bought only in whole packages: unitsPerPkg is fixed, the
+// buyer's quantity is always a count of packages, never individual units.
+model ProductOption {
+  id             String      @id @default(uuid())
+  product        Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId      String
+  unitsPerPkg    Int
+  label          String?
+  pkgPrice       Int
+  unitPrice      Int
+  marketPrice    Int?
+  unitPriceNoVat Int?
+  pkgPriceNoVat  Int?
+  isDefault      Boolean     @default(false)
+  orderItems     OrderItem[]
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([productId])
+}
+
+model FaqCategory {
+  id        String    @id @default(uuid())
+  label     String
+  // Manual display order among non-deleted categories, lowest first —
+  // reordered from the admin panel independent of createdAt.
+  order     Int       @default(0)
+  faqs      Faq[]
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Faq {
+  id         String      @id @default(uuid())
+  category   FaqCategory @relation(fields: [categoryId], references: [id])
+  categoryId String
+  question   String
+  answer     String
+  // Manual display order among non-deleted FAQs within the same category,
+  // lowest first — reordered from the admin panel independent of createdAt.
+  order      Int         @default(0)
+  // Whether this FAQ also appears in the home page's FAQ teaser section
+  // (in addition to always appearing on the full /help page).
+  showOnHome Boolean     @default(false)
+  deletedAt  DateTime?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  @@index([categoryId])
+}
+
+// Singleton row (fixed id "1") holding the company's public contact info,
+// working hours and primary bank account — edited from the admin panel and
+// read by the storefront (footer, contact page, etc).
+model Settings {
+  id                String   @id @default("1")
+  phone             String?
+  email             String?
+  address           String?
+  facebookUrl       String?
+  // Link to the company's Messenger/chat contact (e.g. m.me/... or a Google
+  // Business Messages link) — labelled "gmail холбогдох" by the admin.
+  messengerUrl      String?
+  // Working hours shown alongside the address, e.g. workDays "Даваа–Бямба",
+  // openTime "09:00", closeTime "18:00".
+  workDays          String?
+  openTime          String?
+  closeTime         String?
+  bankName          String?
+  bankAccountNumber String?
+  bankIban          String?
+  bankAccountHolder String?
+  updatedAt         DateTime @updatedAt
+  createdAt         DateTime @default(now())
+}
+
+model Order {
+  id             String      @id @default(uuid())
+  // Human-readable order code shown to the buyer and used to reconcile
+  // payments (e.g. QPay callbacks): "YYYYMMDD" order date + 6 random digits.
+  code           String      @unique
+  user           User?       @relation(fields: [userId], references: [id])
+  userId         String?
+  customerName   String?
+  phone          String
+  // Second contact number collected on the checkout form ("Нэмэлт утасны
+  // дугаар") — a plain contact detail like `phone`, not part of the delivery
+  // address itself, so it isn't part of the Address/snapshot fields below.
+  altPhone       String?
+  address        String?
+  // Optional link to the saved address book entry (Address) this order was
+  // placed with, kept for reference — SetNull on delete so removing a saved
+  // address never touches past orders. The structured fields below are a
+  // snapshot taken at order time either way, so the order's own address
+  // never changes even if the saved Address is later edited or deleted.
+  addressRef     Address?    @relation(fields: [addressId], references: [id], onDelete: SetNull)
+  addressId      String?
+  addressType    String?
+  aimag          String?
+  district       String?
+  khoroo         String?
+  building       String?
+  unit           String?
+  houseNumber    String?
+  street         String?
+  officeBuilding String?
+  floor          String?
+  officeUnit     String?
+  officeName     String?
+  addressNote    String?
+  // Company registration number for this specific order's receipt — lets a
+  // PERSON account request an invoice under a company name for a one-off
+  // purchase, independent of the account's own (usually absent) regNumber.
+  regNumber      String?
+  status         OrderStatus @default(PENDING)
+  // Free-form payment method chosen at checkout ("cash", "transfer", "invoice", ...).
+  // Kept as a plain string rather than an enum since new methods may be added
+  // without a schema change; "invoice" requires the buyer's canInvoice flag.
+  paymentType    String?
+  // Whether this order has been paid directly (e.g. QPay, cash) — set by an
+  // admin, independent of the invoice (Нэхэмжлэх) running-balance ledger,
+  // which tracks pay-later orders via InvoicePayment instead and ignores
+  // this flag entirely.
+  isPaid         Boolean     @default(false)
+  totalAmount    Int
+  items          OrderItem[]
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+}
+
+model OrderItem {
+  id        String         @id @default(uuid())
+  order     Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId   String
+  product   Product        @relation(fields: [productId], references: [id])
+  productId String
+  option    ProductOption? @relation(fields: [optionId], references: [id])
+  optionId  String?
+  qty       Int
+  price     Int
+  // Whether `price` reflects the VAT-inclusive or VAT-exclusive rate the
+  // buyer picked at checkout — recorded so a paid order's receipt doesn't
+  // change if the product's prices are edited later.
+  priceMode PriceMode      @default(VAT)
+}

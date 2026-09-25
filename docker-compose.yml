@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pospaper
+      POSTGRES_PASSWORD: pospaper
+      POSTGRES_DB: pospaper
+    ports:
+      - "5433:5432"
+    volumes:
+      - pospaper_pgdata:/var/lib/postgresql/data
+
+volumes:
+  pospaper_pgdata:
