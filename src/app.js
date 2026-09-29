@@ -15,14 +15,23 @@ const faqsRoutes = require("./routes/faqs.routes");
 const settingsRoutes = require("./routes/settings.routes");
 const analyticsRoutes = require("./routes/analytics.routes");
 const { notFound, errorHandler } = require("./middleware/errorHandler");
+const { apiLimiter } = require("./middleware/rateLimit");
 
 const app = express();
+
+// Only enable if deployed behind a reverse proxy/load balancer (e.g. nginx) —
+// otherwise a client could spoof X-Forwarded-For to dodge the IP-based limits below.
+if (process.env.TRUST_PROXY === "true") {
+  app.set("trust proxy", 1);
+}
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || "http://localhost:3000" }));
 app.use(express.json());
 app.use(morgan("dev"));
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+app.use("/api", apiLimiter);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/products", productsRoutes);

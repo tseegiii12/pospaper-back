@@ -4,7 +4,8 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {
@@ -33,10 +34,14 @@ enum PriceMode {
 model User {
   id              String           @id @default(uuid())
   type            CustomerType     @default(PERSON)
-  phone           String           @unique
+  phone           String?          @unique
   email           String           @unique
   name            String? // contact person's name (both types) — for ORGANIZATION this is the contact, not the company
-  passwordHash    String
+  // Null for accounts created via Google sign-in (no password set).
+  passwordHash    String?
+  // Google account id ("sub" claim), set for accounts created or linked via
+  // Sign in with Google. Null for phone/password-only accounts.
+  googleId        String?          @unique
   role            Role             @default(CUSTOMER)
   // Organization-only fields. regNumber is the company registration number —
   // usually 7 digits but formats vary (letters, other lengths), so it's kept

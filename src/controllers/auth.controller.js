@@ -1,8 +1,11 @@
 const bcrypt = require("bcryptjs");
+const { OAuth2Client } = require("google-auth-library");
 const prisma = require("../lib/prisma");
 const { signToken } = require("../utils/jwt");
 const { generateOtpCode } = require("../utils/otp");
 const { sendOtpEmail } = require("../lib/mailer");
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const OTP_EXPIRY_MINUTES = 5;
 const MAX_OTP_ATTEMPTS = 5;
@@ -185,7 +188,7 @@ async function login(req, res) {
   }
 
   const user = await prisma.user.findUnique({ where: { phone } });
-  if (!user) {
+  if (!user || !user.passwordHash) {
     return res.status(401).json({ error: "Утасны дугаар эсвэл нууц үг буруу байна." });
   }
 
@@ -211,4 +214,131 @@ async function me(req, res) {
   res.json({ user: toPublicUser(req.user) });
 }
 
-module.exports = { requestRegisterOtp, verifyRegisterOtp, login, me };
+// Re-verifies the Google ID token and returns its payload, or null if invalid.
+// Used by both googleAuth and completeGoogleSignup so the token is checked
+// fresh each time rather than trusted across requests.
+async function verifyGoogleCredential(credential) {
+  if (!credential || !process.env.GOOGLE_CLIENT_ID) return null;
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    if (!payload?.email || !payload.email_verified) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+// Verifies a Google ID token from the frontend's Sign in with Google button
+// and logs the user in, linking an existing phone/password account by
+// matching email. If no account exists yet, this does NOT create one —
+// the frontend must collect account type/phone (and org fields) first via
+// completeGoogleSignup, since those fields aren't part of a Google profile.
+async function googleAuth(req, res) {
+  const { credential } = req.body;
+  if (!credential) {
+    return res.status(400).json({ error: "Google токен дутуу байна." });
+  }
+  if (!process.env.GOOGLE_CLIENT_ID) {
+    return res.status(500).json({ error: "Google нэвтрэлт тохируулагдаагүй байна." });
+  }
+
+  const payload = await verifyGoogleCredential(credential);
+  if (!payload) {
+    return res.status(401).json({ error: "Google токен хүчингүй байна." });
+  }
+
+  let user = await prisma.user.findUnique({ where: { googleId: payload.sub } });
+  if (!user) {
+    const existing = await prisma.user.findUnique({ where: { email: payload.email } });
+    if (existing) {
+      user = await prisma.user.update({ where: { id: existing.id }, data: { googleId: payload.sub } });
+    }
+  }
+
+  if (!user) {
+    return res.json({
+      needsProfile: true,
+      profile: { email: payload.email, name: payload.name || null },
+    });
+  }
+
+  const token = signToken(user);
+  res.json({ token, user: toPublicUser(user) });
+}
+
+// Second step for a brand-new Google sign-up: re-verifies the same ID token
+// and creates the account with the account type/phone (and org fields, if
+// applicable) the frontend collected after googleAuth reported needsProfile.
+async function completeGoogleSignup(req, res) {
+  const { credential, phone, orgName, regNumber } = req.body;
+  const type = normalizeCustomerType(req.body.type);
+
+  if (!type) {
+    return res.status(400).json({ error: "Харилцагчийн төрөл буруу байна." });
+  }
+  if (!phone) {
+    return res.status(400).json({ error: "Утасны дугаар шаардлагатай." });
+  }
+
+  const typeFields = validateTypeFields(type, { orgName, regNumber });
+  if (typeFields.error) {
+    return res.status(400).json({ error: typeFields.error });
+  }
+
+  const payload = await verifyGoogleCredential(credential);
+  if (!payload) {
+    return res.status(401).json({ error: "Google токен хүчингүй байна." });
+  }
+
+  // The account may have been created (by this same sign-up, retried, or a
+  // concurrent request) since the frontend last called googleAuth — if so,
+  // just log that account in instead of trying to create a duplicate.
+  let user = await prisma.user.findUnique({ where: { googleId: payload.sub } });
+  if (!user) {
+    const existing = await prisma.user.findUnique({ where: { email: payload.email } });
+    if (existing) {
+      user = await prisma.user.update({ where: { id: existing.id }, data: { googleId: payload.sub } });
+    }
+  }
+
+  if (!user) {
+    try {
+      user = await prisma.user.create({
+        data: {
+          type,
+          phone,
+          email: payload.email,
+          name: payload.name || null,
+          googleId: payload.sub,
+          orgName: typeFields.orgName,
+          regNumber: typeFields.regNumber,
+        },
+      });
+    } catch (err) {
+      if (err.code === "P2002") {
+        const target = err.meta?.target || [];
+        const message = target.includes("regNumber")
+          ? "Энэ регистрийн дугаараар бүртгэлтэй байгууллага байна."
+          : "Энэ утасны дугаараар бүртгэлтэй хэрэглэгч байна.";
+        return res.status(409).json({ error: message });
+      }
+      throw err;
+    }
+  }
+
+  const token = signToken(user);
+  res.status(201).json({ token, user: toPublicUser(user) });
+}
+
+module.exports = {
+  requestRegisterOtp,
+  verifyRegisterOtp,
+  login,
+  me,
+  googleAuth,
+  completeGoogleSignup,
+};
