@@ -5,8 +5,7 @@ const {
   login,
   me,
   googleAuth,
-  completeGoogleSignup,
-} = require("../controllers/auth.controller");
+} =require("../controllers/auth.controller");
 const { requireAuth } = require("../middleware/auth");
 const { authLimiter } = require("../middleware/rateLimit");
 const asyncHandler = require("../utils/asyncHandler");
@@ -17,7 +16,6 @@ router.post("/register/request-otp", authLimiter, asyncHandler(requestRegisterOt
 router.post("/register/verify-otp", authLimiter, asyncHandler(verifyRegisterOtp));
 router.post("/login", authLimiter, asyncHandler(login));
 router.post("/google", authLimiter, asyncHandler(googleAuth));
-router.post("/google/complete", authLimiter, asyncHandler(completeGoogleSignup));
 router.get("/me", requireAuth, asyncHandler(me));
 
 module.exports = router;

@@ -1,11 +1,18 @@
 const prisma = require("../lib/prisma");
 
 // Storefront + admin dropdowns only ever see non-deleted categories.
+// Sorted by how many visible products each has (most first), then by label,
+// so the busiest categories show at the top of the list.
 async function list(_req, res) {
-  const categories = await prisma.category.findMany({
+  const rows = await prisma.category.findMany({
     where: { deletedAt: null },
-    orderBy: { label: "asc" },
+    include: {
+      _count: { select: { products: { where: { active: true, deletedAt: null } } } },
+    },
   });
+  const categories = rows
+    .map(({ _count, ...category }) => ({ ...category, productCount: _count.products }))
+    .sort((a, b) => b.productCount - a.productCount || a.label.localeCompare(b.label, "mn"));
   res.json({ categories });
 }
 

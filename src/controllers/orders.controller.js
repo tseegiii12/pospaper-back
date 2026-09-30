@@ -155,6 +155,19 @@ async function create(req, res) {
     });
   }
 
+  // Google sign-ups start without a phone; take it from their first order.
+  // Skipped if another account already owns that number (phone is unique).
+  if (!req.user.phone) {
+    try {
+      await prisma.user.update({
+        where: { id: req.user.id },
+        data: { phone: String(phone).trim() },
+      });
+    } catch (err) {
+      if (err.code !== "P2002") throw err;
+    }
+  }
+
   res.status(201).json({ order });
 }
 
